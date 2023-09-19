@@ -1,3 +1,4 @@
+```sh
 # instructions:
 ./simds_dataset/data_prepare.py 将数据集划分为train和test
 ./simds_dataset/get_annotation.py 将mask转换为txt label
@@ -39,3 +40,4 @@ sudo sh build.sh
 sudo sh test.sh # never mind the Error of tmp not exist
 sudo sh export.sh
 # submit
+```
