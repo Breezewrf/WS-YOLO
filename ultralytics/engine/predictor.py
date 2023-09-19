@@ -11,7 +11,7 @@ Usage - sources:
                                                 list.txt                        # list of images
                                                 list.streams                    # list of streams
                                                 'path/*.jpg'                    # glob
-                                                'https://youtu.be/LNwODJXcvt4'  # YouTube
+                                                'https://youtu.be/Zgi9g1ksQHc'  # YouTube
                                                 'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream
 
 Usage - formats:
@@ -20,7 +20,7 @@ Usage - formats:
                               yolov8n.onnx               # ONNX Runtime or OpenCV DNN with dnn=True
                               yolov8n_openvino_model     # OpenVINO
                               yolov8n.engine             # TensorRT
-                              yolov8n.mlpackage          # CoreML (macOS-only)
+                              yolov8n.mlmodel            # CoreML (macOS-only)
                               yolov8n_saved_model        # TensorFlow SavedModel
                               yolov8n.pb                 # TensorFlow GraphDef
                               yolov8n.tflite             # TensorFlow Lite
@@ -34,27 +34,58 @@ import cv2
 import numpy as np
 import torch
 
-from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data import load_inference_source
-from ultralytics.data.augment import LetterBox, classify_transforms
 from ultralytics.nn.autobackend import AutoBackend
-from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, colorstr, ops
-from ultralytics.utils.checks import check_imgsz, check_imshow
-from ultralytics.utils.files import increment_path
-from ultralytics.utils.torch_utils import select_device, smart_inference_mode
+from ultralytics.yolo.cfg import get_cfg
+from ultralytics.yolo.data import load_inference_source
+from ultralytics.yolo.data.augment import LetterBox, classify_transforms
+from ultralytics.yolo.utils import DEFAULT_CFG, LOGGER, MACOS, SETTINGS, WINDOWS, callbacks, colorstr, ops
+from ultralytics.yolo.utils.checks import check_imgsz, check_imshow
+from ultralytics.yolo.utils.files import increment_path
+from ultralytics.yolo.utils.torch_utils import select_device, smart_inference_mode
 
 STREAM_WARNING = """
-WARNING ⚠️ inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
-errors for large sources or long-running streams and videos. See https://docs.ultralytics.com/modes/predict/ for help.
+    WARNING ⚠️ stream/video/webcam/dir predict source will accumulate results in RAM unless `stream=True` is passed,
+    causing potential out-of-memory errors for large sources or long-running streams/videos.
 
-Example:
-    results = model(source=..., stream=True)  # generator of Results objects
-    for r in results:
-        boxes = r.boxes  # Boxes object for bbox outputs
-        masks = r.masks  # Masks object for segment masks outputs
-        probs = r.probs  # Class probabilities for classification outputs
+    Usage:
+        results = model(source=..., stream=True)  # generator of Results objects
+        for r in results:
+            boxes = r.boxes  # Boxes object for bbox outputs
+            masks = r.masks  # Masks object for segment masks outputs
+            probs = r.probs  # Class probabilities for classification outputs
 """
-
+pseudo_image_path = "/mnt/shared/wrf/yolov8/regenerate_round1/images"
+pseudo_label_path = "/mnt/shared/wrf/yolov8/regenerate_round1/bbox2/labels"
+label_mapper = {
+    'suction irrigator': 0,
+    'bipolar dissector': 1,
+    'stapler': 2,
+    'tip-up fenestrated grasper': 3,
+    'needle driver': 4,
+    'cadiere forceps': 5,
+    'prograsp forceps': 6,
+    'monopolar curved scissors': 7,
+    'bipolar forceps': 8,
+    'force bipolar': 9,
+    'vessel sealer': 10,
+    'permanent cautery hook/spatula': 11,
+    'clip applier': 12,
+    'grasping retractor': 13
+}
+label_mapper_v2 = { "needle driver": 0,
+                    "monopolar curved scissors": 1,
+                    "force bipolar": 2,
+                    "clip applier": 3,
+                    "tip-up fenestrated grasper": 4,
+                    "cadiere forceps": 5,
+                    "bipolar forceps": 6,
+                    "vessel sealer": 7,
+                    "suction irrigator": 8,
+                    "bipolar dissector": 9,
+                    "prograsp forceps": 10,
+                    "stapler": 11,
+                    "permanent cautery hook/spatula": 12,
+                    "grasping retractor": 13}
 
 class BasePredictor:
     """
@@ -84,7 +115,7 @@ class BasePredictor:
             overrides (dict, optional): Configuration overrides. Defaults to None.
         """
         self.args = get_cfg(cfg, overrides)
-        self.save_dir = get_save_dir(self.args)
+        self.save_dir = self.get_save_dir()
         if self.args.conf is None:
             self.args.conf = 0.25  # default conf=0.25
         self.done_warmup = False
@@ -105,8 +136,12 @@ class BasePredictor:
         self.results = None
         self.transforms = None
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
-        self.txt_path = None
         callbacks.add_integration_callbacks(self)
+
+    def get_save_dir(self):
+        project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task
+        name = self.args.name or f'{self.args.mode}'
+        return increment_path(Path(project) / name, exist_ok=self.args.exist_ok)
 
     def preprocess(self, im):
         """Prepares input image before inference.
@@ -121,30 +156,23 @@ class BasePredictor:
             im = np.ascontiguousarray(im)  # contiguous
             im = torch.from_numpy(im)
 
-        im = im.to(self.device)
-        im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
+        img = im.to(self.device)
+        img = img.half() if self.model.fp16 else img.float()  # uint8 to fp16/32
         if not_tensor:
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-        return im
-
-    def inference(self, im, *args, **kwargs):
-        visualize = increment_path(self.save_dir / Path(self.batch[0][0]).stem,
-                                   mkdir=True) if self.args.visualize and (not self.source_type.tensor) else False
-        return self.model(im, augment=self.args.augment, visualize=visualize)
+            img /= 255  # 0 - 255 to 0.0 - 1.0
+        return img
 
     def pre_transform(self, im):
-        """
-        Pre-transform input image before inference.
+        """Pre-transform input image before inference.
 
         Args:
             im (List(np.ndarray)): (N, 3, h, w) for tensor, [(h, w, 3) x N] for list.
 
-        Returns:
-            (list): A list of transformed images.
+        Return: A list of transformed imgs.
         """
         same_shapes = all(x.shape == im[0].shape for x in im)
-        letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
-        return [letterbox(image=x) for x in im]
+        auto = same_shapes and self.model.pt
+        return [LetterBox(self.imgsz, auto=auto, stride=self.model.stride)(image=x) for x in im]
 
     def write_results(self, idx, results, batch):
         """Write inference results to a file or directory."""
@@ -162,7 +190,7 @@ class BasePredictor:
         log_string += '%gx%g ' % im.shape[2:]  # print string
         result = results[idx]
         log_string += result.verbose()
-
+        print(result.verbose())
         if self.args.save or self.args.show:  # Add bbox to image
             plot_args = {
                 'line_width': self.args.line_width,
@@ -176,8 +204,7 @@ class BasePredictor:
         if self.args.save_txt:
             result.save_txt(f'{self.txt_path}.txt', save_conf=self.args.save_conf)
         if self.args.save_crop:
-            result.save_crop(save_dir=self.save_dir / 'crops',
-                             file_name=self.data_path.stem + ('' if self.dataset.mode == 'image' else f'_{frame}'))
+            result.save_crop(save_dir=self.save_dir / 'crops', file_name=self.data_path.stem)
 
         return log_string
 
@@ -185,13 +212,13 @@ class BasePredictor:
         """Post-processes predictions for an image and returns them."""
         return preds
 
-    def __call__(self, source=None, model=None, stream=False, *args, **kwargs):
+    def __call__(self, source=None, model=None, stream=False):
         """Performs inference on an image or stream."""
         self.stream = stream
         if stream:
-            return self.stream_inference(source, model, *args, **kwargs)
+            return self.stream_inference(source, model)
         else:
-            return list(self.stream_inference(source, model, *args, **kwargs))  # merge list of Result into one
+            return list(self.stream_inference(source, model))  # merge list of Result into one
 
     def predict_cli(self, source=None, model=None):
         """Method used for CLI prediction. It uses always generator as outputs as not required by CLI mode."""
@@ -204,10 +231,7 @@ class BasePredictor:
         self.imgsz = check_imgsz(self.args.imgsz, stride=self.model.stride, min_dim=2)  # check image size
         self.transforms = getattr(self.model.model, 'transforms', classify_transforms(
             self.imgsz[0])) if self.args.task == 'classify' else None
-        self.dataset = load_inference_source(source=source,
-                                             imgsz=self.imgsz,
-                                             vid_stride=self.args.vid_stride,
-                                             buffer=self.args.stream_buffer)
+        self.dataset = load_inference_source(source=source, imgsz=self.imgsz, vid_stride=self.args.vid_stride)
         self.source_type = self.dataset.source_type
         if not getattr(self, 'stream', True) and (self.dataset.mode == 'stream' or  # streams
                                                   len(self.dataset) > 1000 or  # images
@@ -216,7 +240,7 @@ class BasePredictor:
         self.vid_path, self.vid_writer = [None] * self.dataset.bs, [None] * self.dataset.bs
 
     @smart_inference_mode()
-    def stream_inference(self, source=None, model=None, *args, **kwargs):
+    def stream_inference(self, source=None, model=None):
         """Streams real-time inference on camera feed and saves results to file."""
         if self.args.verbose:
             LOGGER.info('')
@@ -243,14 +267,30 @@ class BasePredictor:
             self.run_callbacks('on_predict_batch_start')
             self.batch = batch
             path, im0s, vid_cap, s = batch
-
+            visualize = increment_path(self.save_dir / Path(path[0]).stem,
+                                       mkdir=True) if self.args.visualize and (not self.source_type.tensor) else False
+            
+            # author: breezewrf@gmail.com
+            # import csv
+            # clip_instruments = {}
+            # with open('/mnt/shared/wrf/surgtoolloc2022_dataset/_release/training_data/labels.csv') as f:
+            #     reader = csv.reader(f)
+            #     next(reader) # 跳过标题行
+            #     for row in reader:
+            #         clip_id, instruments = row[0], row[2]
+            #         clip_instruments['clip_{}'.format(clip_id.zfill(6))] = instruments
+            # clip_id = path[0].split('/')[-1].split('.')[0][:11]
+            # instruments = clip_instruments[clip_id].strip('[]').split(', ')
+            # instruments = [i.strip(' ') for i in instruments if i != 'nan']
+            # assert len(instruments) == 3, print(f'please check {instruments}')
+            
             # Preprocess
             with profilers[0]:
                 im = self.preprocess(im0s)
 
             # Inference
             with profilers[1]:
-                preds = self.inference(im, *args, **kwargs)
+                preds = self.model(im, augment=self.args.augment, visualize=visualize)
 
             # Postprocess
             with profilers[2]:
@@ -260,18 +300,99 @@ class BasePredictor:
             # Visualize, save, write results
             n = len(im0s)
             for i in range(n):
+                # print(self.results[i].boxes.cls)
                 self.seen += 1
+
+
+                # author: breezewrf@gmail.com
+                # f = False
+                # f_idx = -1
+                # f_list = []
+                # for i_ in instruments:
+                #     f_idx += 1
+                #     if i_ in ['monopolar curved scissors', 'tip-up fenestrated grasper', 'suction irrigator', 'stapler', 'grasping retractor']:
+                #         f = True
+                #         f_list.append(f_idx)
+                # if f:
+                #     if torch.count_nonzero(self.results[i].boxes.cls == 1).item() != 3 or torch.count_nonzero(self.results[i].boxes.cls == 2).item() != 3:
+                #         continue
+                # else:
+                #     if torch.count_nonzero(self.results[i].boxes.cls == 1).item() != 3:
+                #         continue
+                # print(f"torch.count_nonzero(self.results[i].boxes.cls == 2).item(): {torch.count_nonzero(self.results[i].boxes.cls == 2).item()}， f: {f} ")
+                
+                
                 self.results[i].speed = {
                     'preprocess': profilers[0].dt * 1E3 / n,
                     'inference': profilers[1].dt * 1E3 / n,
                     'postprocess': profilers[2].dt * 1E3 / n}
                 p, im0 = path[i], None if self.source_type.tensor else im0s[i].copy()
+                
                 p = Path(p)
-
                 if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
                     s += self.write_results(i, self.results, (p, im, im0))
+
+                    # author: breezewrf@gmail.com
+                    # print(f"image path: {self.txt_path.replace('bbox1/labels', 'images') + '.jpg'}")
+                    # cv2.imwrite(self.txt_path.replace('bbox1/labels', 'images') + '.jpg', im0)
+
                 if self.args.save or self.args.save_txt:
                     self.results[i].save_dir = self.save_dir.__str__()
+
+
+                    # author: breezewrf@gmail.com
+                    # img_name = '_{}.jpg'.format(self.seen)
+                    # print(f"saved to {(pseudo_image_path + '/' + p.name).replace('.mp4', img_name)}, frame: {self.seen}")
+                    # cv2.imwrite((pseudo_image_path + '/' + p.name).replace('.mp4', img_name), im0)
+
+                    # # sort the bbox of Part1
+                    # idx1 = torch.where(self.results[i].boxes.cls == 1)[0]
+                    # # The idx should be sorted according to the bbox order by left to right!
+                    # sorted_indices1 = torch.argsort(self.results[i].boxes.xyxy[:, 0])
+                    # idx_sorted1 = []
+                    # # get the index of Part1 bbox in result bbox list
+                    # for i_ in sorted_indices1:
+                    #     if i_ in idx1:
+                    #         idx_sorted1.append(i_)
+                    # idx_sorted1 = torch.tensor(idx_sorted1, device='cuda:0')
+                    # # sort the bbox of Part2
+                    # idx2 = torch.where(self.results[i].boxes.cls == 2)[0]
+                    # # The idx should be sorted according to the bbox order by left to right!
+                    # sorted_indices2 = torch.argsort(self.results[i].boxes.xyxy[:, 0])
+                    # idx_sorted2 = []
+                    # # get the index of Part2 bbox in result bbox list
+                    # for i_ in sorted_indices2:
+                    #     if i_ in idx2:
+                    #         idx_sorted2.append(i_)
+                    # idx_sorted2 = torch.tensor(idx_sorted2, device='cuda:0')
+
+                    # if f:
+                    #     lines = ""
+                    #     for i0, id in enumerate(idx_sorted1):
+                    #         if i0 in f_list: # f_list contain the special bbox class, which want Part2
+                    #             id_f = idx_sorted2[i0]
+                    #             print("check!")
+                    #             line = (str(label_mapper_v2[instruments[i0]]) + str(self.results[i].boxes.xywhn[id_f].cpu().numpy()).replace('    ', ' ').replace('   ', ' ').replace('[', '').replace(']', '').replace('  ', ' ') + '\n')    
+                    #         else:
+                    #             line = (str(label_mapper_v2[instruments[i0]]) + str(self.results[i].boxes.xywhn[id].cpu().numpy()).replace('    ', ' ').replace('   ', ' ').replace('[', '').replace(']', '').replace('  ', ' ') + '\n')
+                    #         lines += line
+                    #     print(lines)
+                    #     assert idx_sorted2.shape[0] == 3, f"check the idx_sorted2: {idx_sorted2}"
+                        
+                    #     with open((pseudo_label_path + '/' + p.name).replace('.mp4', img_name).replace('jpg', 'txt'), 'w') as f:
+                    #         f.write(lines)
+                    # else:  # only want Part1
+                    #     assert idx_sorted1.shape[0] == 3 and torch.count_nonzero(self.results[i].boxes.cls == 1).item() == 3, f"check the idx_sorted2: {idx_sorted1}" 
+                    #     lines = ""
+                    #     for i0, id in enumerate(idx_sorted1):
+                    #         line = (str(label_mapper_v2[instruments[i0]]) + str(self.results[i].boxes.xywhn[id].cpu().numpy()).replace('    ', ' ').replace('   ', ' ').replace('[', '').replace(']', '').replace('  ', ' ') + '\n')
+                    #         lines += line
+                    #     print(lines)
+                    #     with open((pseudo_label_path + '/' + p.name).replace('.mp4', img_name).replace('jpg', 'txt'), 'w') as f:
+                    #         f.write(lines)
+                    # print(self.results[i].boxes.xywhn)
+
+
                 if self.args.show and self.plotted_img is not None:
                     self.show(p)
                 if self.args.save and self.plotted_img is not None:
@@ -302,16 +423,17 @@ class BasePredictor:
 
     def setup_model(self, model, verbose=True):
         """Initialize YOLO model with given parameters and set it to evaluation mode."""
-        self.model = AutoBackend(model or self.args.model,
-                                 device=select_device(self.args.device, verbose=verbose),
+        device = select_device(self.args.device, verbose=verbose)
+        model = model or self.args.model
+        self.args.half &= device.type != 'cpu'  # half precision only supported on CUDA
+        self.model = AutoBackend(model,
+                                 device=device,
                                  dnn=self.args.dnn,
                                  data=self.args.data,
                                  fp16=self.args.half,
                                  fuse=True,
                                  verbose=verbose)
-
-        self.device = self.model.device  # update device
-        self.args.half = self.model.fp16  # update half
+        self.device = device
         self.model.eval()
 
     def show(self, p):
@@ -341,7 +463,8 @@ class BasePredictor:
                     h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 else:  # stream
                     fps, w, h = 30, im0.shape[1], im0.shape[0]
-                suffix, fourcc = ('.mp4', 'avc1') if MACOS else ('.avi', 'WMV2') if WINDOWS else ('.avi', 'MJPG')
+                suffix = '.mp4' if MACOS else '.avi' if WINDOWS else '.avi'
+                fourcc = 'avc1' if MACOS else 'WMV2' if WINDOWS else 'MJPG'
                 save_path = str(Path(save_path).with_suffix(suffix))
                 self.vid_writer[idx] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
             self.vid_writer[idx].write(im0)
