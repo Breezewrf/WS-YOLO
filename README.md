@@ -3,7 +3,7 @@
 
 ## Overview
 ![ ](./docs//fig1.png)
-We proposed a Weakly Supervised Yolo Network for Surgical Tool Localization in Endoscopic Videos(WS-YOLO), which significantly diminishes the necessary human annotation labor while striking an optimal balance between the quantity of manually annotated data and detection performance. The fine-grained semantic information with location and category was generated from coarse-grained semantic information outputted bu the da Vinci surgical robot through multiple iterations.
+We proposed a Weakly Supervised Yolo Network (WS-YOLO) for Surgical Tool Localization in Endoscopic Videos, which significantly diminishes the necessary human annotation labor while striking an optimal balance between the quantity of manually annotated data and detection performance. The fine-grained semantic information with location and category was generated from coarse-grained semantic information outputted bu the da Vinci surgical robot through multiple iterations.
 
 ## Requirements
 This repo was forked from [YOLOv8](https://github.com/ultralytics/ultralytics). 
