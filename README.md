@@ -14,6 +14,7 @@ Additional dataset: https://www.synapse.org/#!Synapse:syn47193563/files/
 
 ### Additional Dataset Preprocess:
 `./simds_dataset/data_prepare.py` 将数据集划分为train和test
+
 `./simds_dataset/get_annotation.py` 将mask转换为txt label
 
 ## Training
